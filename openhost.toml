@@ -1,0 +1,20 @@
+[app]
+name = "graphhopper"
+version = "0.1.0"
+description = "GraphHopper — self-hosted routing engine with built-in map UI. Supports car, bike, and foot navigation with turn-by-turn directions."
+authors = ["Andrew Laack <andrew@laack.co>"]
+
+[runtime.container]
+image = "Dockerfile"
+port = 8080
+
+[routing]
+health_check = "/healthz"
+
+[resources]
+memory_mb = 8192
+cpu_millicores = 2000
+
+[data]
+app_data = true
+app_temp_data = true
