@@ -12,7 +12,7 @@ port = 8080
 health_check = "/healthz"
 
 [resources]
-memory_mb = 8192
+memory_mb = 12288
 cpu_millicores = 2000
 
 [data]
