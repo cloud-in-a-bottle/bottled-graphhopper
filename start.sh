@@ -68,42 +68,19 @@ JAVA_OPTS="-Xmx${HEAP_MB}m -Xms$((HEAP_MB / 2))m"
 export JAVA_OPTS
 echo "[start.sh] Java heap: ${HEAP_MB}m"
 
-# --- Write GraphHopper config ---
-# The upstream image has config-example.yml. We create our own to
-# control bind_host and data paths.
-GH_CONFIG="${APP_DATA}/config.yml"
-cat > "$GH_CONFIG" <<GHCFG
-graphhopper:
-  datareader.file: ${PBF_FILE}
-  graph.location: ${GRAPH_DIR}
-
-  profiles:
-    - name: car
-      turn_costs: true
-    - name: bike
-    - name: foot
-
-  profiles_ch:
-    - profile: car
-    - profile: bike
-    - profile: foot
-
-  server:
-    application_connectors:
-      - type: http
-        bind_host: ${GH_HOST}
-        port: ${GH_PORT}
-    admin_connectors:
-      - type: http
-        bind_host: ${GH_HOST}
-        port: 8990
-GHCFG
+# --- Use upstream config with overrides via system properties ---
+# The upstream image has config-example.yml with sensible defaults.
+# We override specific settings via -D flags at runtime.
+GH_CONFIG="${GH_DIR}/config-example.yml"
 
 # --- Build graph if not present ---
 if [ ! -d "$GRAPH_DIR" ] || [ -z "$(ls -A "$GRAPH_DIR" 2>/dev/null)" ]; then
     echo "[start.sh] Building routing graph (first boot, may take 10-60 min)..."
     cd "$GH_DIR"
-    java $JAVA_OPTS -jar graphhopper-web-*.jar import "$GH_CONFIG" 2>&1 || {
+    java $JAVA_OPTS \
+        -Ddw.graphhopper.datareader.file="$PBF_FILE" \
+        -Ddw.graphhopper.graph.location="$GRAPH_DIR" \
+        -jar graphhopper-web-*.jar import "$GH_CONFIG" 2>&1 || {
         echo "[start.sh] Graph build failed."
         rm -rf "$GRAPH_DIR"
         exit 1
@@ -114,7 +91,12 @@ fi
 # --- Start GraphHopper ---
 echo "[start.sh] Starting GraphHopper on ${GH_HOST}:${GH_PORT}..."
 cd "$GH_DIR"
-java $JAVA_OPTS -jar graphhopper-web-*.jar server "$GH_CONFIG" &
+java $JAVA_OPTS \
+    -Ddw.graphhopper.datareader.file="$PBF_FILE" \
+    -Ddw.graphhopper.graph.location="$GRAPH_DIR" \
+    -Ddw.graphhopper.server.application_connectors[0].bind_host="${GH_HOST}" \
+    -Ddw.graphhopper.server.application_connectors[0].port="${GH_PORT}" \
+    -jar graphhopper-web-*.jar server "$GH_CONFIG" &
 GH_PID=$!
 
 echo "[start.sh] Waiting for GraphHopper..."
