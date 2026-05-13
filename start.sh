@@ -32,7 +32,7 @@ mkdir -p "$APP_DATA"
 
 # --- Region configuration ---
 REGION_CONF="${APP_DATA}/region.conf"
-PBF_URL="https://download.geofabrik.de/europe/germany-latest.osm.pbf"
+PBF_URL="https://download.geofabrik.de/north-america/us/california-latest.osm.pbf"
 
 if [ -f "$REGION_CONF" ]; then
     # shellcheck source=/dev/null
@@ -44,7 +44,7 @@ else
 # Change PBF_URL to load a different region, then delete
 # graph-cache/ directory in app_data and restart.
 # Extracts: https://download.geofabrik.de/
-PBF_URL=https://download.geofabrik.de/europe/germany-latest.osm.pbf
+PBF_URL=https://download.geofabrik.de/north-america/us/california-latest.osm.pbf
 EOF
     echo "[start.sh] Created default region.conf (Germany)"
 fi
