@@ -124,7 +124,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         """Serve a patched config.js that points geocoding at our local proxy."""
         body = b"""const config = {
     routingApi: location.origin + '/',
-    geocodingApi: location.origin + '/geocode',
+    geocodingApi: location.origin + '/',
     defaultTiles: 'OpenStreetMap',
     keys: {
         graphhopper: "",
