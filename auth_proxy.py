@@ -125,7 +125,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             conn.close()
 
     def _serve_config_js(self):
-        """Serve a patched config.js that points geocoding at our local proxy."""
+        """Serve a patched config.js that enables geocoding."""
         body = b"""const config = {
     routingApi: location.origin + '/',
     geocodingApi: location.origin + '/',
@@ -156,6 +156,85 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
         self.end_headers()
         self.wfile.write(body)
+
+    def _serve_maps_with_geocoding_patch(self):
+        """Proxy /maps/ but inject a geocoding shim script.
+
+        The GH Maps UI's autocomplete uses a complex Overpass-based pipeline
+        that doesn't work with just Nominatim. We inject a small script that
+        intercepts fetch() calls to /geocode with provider=default and converts
+        them to direct Nominatim lookups, returning results the UI can display.
+        """
+        # Fetch original /maps/ from upstream
+        try:
+            conn = http.client.HTTPConnection(UPSTREAM_HOST, UPSTREAM_PORT, timeout=30)
+            conn.request("GET", self.path)
+            resp = conn.getresponse()
+            html = resp.read()
+            conn.close()
+        except Exception:
+            self._proxy_to(UPSTREAM_HOST, UPSTREAM_PORT)
+            return
+
+        # Inject geocoding patch before </head>
+        patch = b"""<script>
+// Geocoding patch: intercept fetch to /geocode?provider=default
+// and return Nominatim results in a format the dropdown understands
+(function() {
+    const origFetch = window.fetch;
+    window.fetch = function(url, opts) {
+        if (typeof url === 'string' && url.includes('/geocode?') && url.includes('provider=default')) {
+            const u = new URL(url, location.origin);
+            const q = u.searchParams.get('q');
+            if (!q || q.length < 2) return origFetch.apply(this, arguments);
+            const locale = u.searchParams.get('locale') || 'en';
+            const nomUrl = 'https://nominatim.openstreetmap.org/search?format=json&limit=5&addressdetails=1' +
+                '&accept-language=' + encodeURIComponent(locale) +
+                '&q=' + encodeURIComponent(q);
+            return fetch(nomUrl, {headers: {'Accept': 'application/json'}})
+                .then(r => r.json())
+                .then(results => {
+                    const hits = results.map(r => ({
+                        point: {lat: parseFloat(r.lat), lng: parseFloat(r.lon)},
+                        name: r.display_name,
+                        osm_id: r.osm_id,
+                        osm_type: r.osm_type,
+                        osm_key: r.class || '',
+                        osm_value: r.type || '',
+                        country: (r.address||{}).country || '',
+                        city: (r.address||{}).city || (r.address||{}).town || (r.address||{}).village || '',
+                        state: (r.address||{}).state || '',
+                        street: (r.address||{}).road || '',
+                        housenumber: (r.address||{}).house_number || '',
+                        postcode: (r.address||{}).postcode || '',
+                        extent: r.boundingbox ? [
+                            parseFloat(r.boundingbox[2]), parseFloat(r.boundingbox[0]),
+                            parseFloat(r.boundingbox[3]), parseFloat(r.boundingbox[1])
+                        ] : undefined
+                    }));
+                    return new Response(JSON.stringify({hits: hits, locale: locale}), {
+                        status: 200,
+                        headers: {'Content-Type': 'application/json'}
+                    });
+                })
+                .catch(() => origFetch.apply(this, arguments));
+        }
+        return origFetch.apply(this, arguments);
+    };
+})();
+</script>
+"""
+        html = html.replace(b'</head>', patch + b'</head>')
+
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(html)))
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(html)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
 
     def _geocode_proxy(self):
         """Proxy geocoding requests to Nominatim, translating to GH format.
@@ -250,7 +329,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._serve_config_js()
             return
 
-        # Geocoding proxy (Nominatim -> GH format)
+        # Serve /maps/ with geocoding shim injected
+        if path_only in ("/maps/", "/maps"):
+            self._serve_maps_with_geocoding_patch()
+            return
+
+        # Geocoding proxy (Nominatim -> GH format) for nominatim provider
         if path_only == "/geocode":
             self._geocode_proxy()
             return
