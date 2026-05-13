@@ -19,10 +19,12 @@ PROXY_PORT=8080
 
 GH_PID=""
 PROXY_PID=""
+ADMIN_PID=""
 
 cleanup() {
     echo "[start.sh] Shutting down..."
     [ -n "$PROXY_PID" ] && kill "$PROXY_PID" 2>/dev/null || true
+    [ -n "$ADMIN_PID" ] && kill "$ADMIN_PID" 2>/dev/null || true
     [ -n "$GH_PID" ] && kill "$GH_PID" 2>/dev/null || true
     wait
 }
@@ -117,14 +119,19 @@ for i in $(seq 1 120); do
     sleep 1
 done
 
+# --- Start admin UI ---
+echo "[start.sh] Starting admin UI on 127.0.0.1:8091..."
+python3 /opt/openhost/admin.py &
+ADMIN_PID=$!
+
 # --- Start auth proxy ---
 echo "[start.sh] Starting auth proxy on 0.0.0.0:${PROXY_PORT}..."
 python3 /opt/openhost/auth_proxy.py &
 PROXY_PID=$!
 
-echo "[start.sh] All services started. GH=$GH_PID PROXY=$PROXY_PID"
+echo "[start.sh] All services started. GH=$GH_PID ADMIN=$ADMIN_PID PROXY=$PROXY_PID"
 
-wait -n "$GH_PID" "$PROXY_PID"
+wait -n "$GH_PID" "$ADMIN_PID" "$PROXY_PID"
 EXIT_CODE=$?
 echo "[start.sh] Child exited (code=$EXIT_CODE)."
 exit "$EXIT_CODE"

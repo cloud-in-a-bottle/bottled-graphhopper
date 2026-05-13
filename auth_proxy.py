@@ -3,6 +3,7 @@
 
 GraphHopper has no user accounts. OpenHost zone_auth gates all access.
 Listens on 0.0.0.0:8080, proxies to GraphHopper at 127.0.0.1:8989.
+Routes /admin* to the admin UI at 127.0.0.1:8091 (owner-only).
 """
 
 from __future__ import annotations
@@ -18,7 +19,9 @@ import threading
 LISTEN_ADDR = "0.0.0.0"
 LISTEN_PORT = int(os.environ.get("AUTH_PROXY_LISTEN_PORT", "8080"))
 UPSTREAM_HOST = "127.0.0.1"
-UPSTREAM_PORT = int(os.environ.get("AUTH_PROXY_UPSTREAM_PORT", "8989"))  # GH default
+UPSTREAM_PORT = int(os.environ.get("AUTH_PROXY_UPSTREAM_PORT", "8989"))
+ADMIN_HOST = "127.0.0.1"
+ADMIN_PORT = 8091
 
 STRIP_HEADERS = frozenset(h.lower() for h in [
     "x-openhost-is-owner", "x-openhost-app-token",
@@ -39,7 +42,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         pass
 
     def _serve_healthz(self):
-        # Check upstream is alive before reporting healthy
         try:
             s = socket.create_connection((UPSTREAM_HOST, UPSTREAM_PORT), timeout=2)
             s.close()
@@ -54,12 +56,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _proxy(self):
-        path_only = self.path.split("?", 1)[0]
-        if path_only == "/healthz":
-            self._serve_healthz()
-            return
-
+    def _proxy_to(self, host, port):
+        """Proxy current request to the given host:port."""
         body = None
         cl = self.headers.get("Content-Length")
         if cl:
@@ -78,15 +76,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 headers[key] = ", ".join(values)
 
         fh = self.headers.get("X-Forwarded-Host")
-        headers["Host"] = fh if fh else f"{UPSTREAM_HOST}:{UPSTREAM_PORT}"
+        headers["Host"] = fh if fh else f"{host}:{port}"
         if "X-Forwarded-Proto" not in headers:
             headers["X-Forwarded-Proto"] = "https"
 
         try:
-            conn = http.client.HTTPConnection(UPSTREAM_HOST, UPSTREAM_PORT, timeout=120)
+            conn = http.client.HTTPConnection(host, port, timeout=120)
             conn.request(self.command, self.path, body=body, headers=headers)
             resp = conn.getresponse()
-        except (ConnectionRefusedError, socket.timeout, OSError) as exc:
+        except (ConnectionRefusedError, socket.timeout, OSError):
             try:
                 self.send_error(502, "bad gateway")
             except OSError:
@@ -118,7 +116,26 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         finally:
             conn.close()
 
-    do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _proxy
+    def _handle(self):
+        path_only = self.path.split("?", 1)[0]
+
+        if path_only == "/healthz":
+            self._serve_healthz()
+            return
+
+        # Route /admin* to admin service (owner-only)
+        if path_only.startswith("/admin"):
+            is_owner = self.headers.get("X-OpenHost-Is-Owner", "").lower() == "true"
+            if not is_owner:
+                self.send_error(403, "Admin access requires OpenHost owner")
+                return
+            self._proxy_to(ADMIN_HOST, ADMIN_PORT)
+            return
+
+        # Everything else goes to GraphHopper
+        self._proxy_to(UPSTREAM_HOST, UPSTREAM_PORT)
+
+    do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _handle
 
 
 class ThreadedServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
@@ -128,8 +145,8 @@ class ThreadedServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 def main():
     server = ThreadedServer((LISTEN_ADDR, LISTEN_PORT), ProxyHandler)
-    print(f"[auth_proxy] {LISTEN_ADDR}:{LISTEN_PORT} -> {UPSTREAM_HOST}:{UPSTREAM_PORT}",
-          file=sys.stderr, flush=True)
+    print(f"[auth_proxy] {LISTEN_ADDR}:{LISTEN_PORT} -> GH {UPSTREAM_HOST}:{UPSTREAM_PORT}, "
+          f"admin {ADMIN_HOST}:{ADMIN_PORT}", file=sys.stderr, flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

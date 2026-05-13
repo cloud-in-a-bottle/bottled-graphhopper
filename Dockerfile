@@ -20,7 +20,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY start.sh /opt/openhost/start.sh
 COPY auth_proxy.py /opt/openhost/auth_proxy.py
-RUN chmod 0755 /opt/openhost/start.sh /opt/openhost/auth_proxy.py
+COPY admin.py /opt/openhost/admin.py
+RUN chmod 0755 /opt/openhost/start.sh /opt/openhost/auth_proxy.py /opt/openhost/admin.py
 
 EXPOSE 8080
 
