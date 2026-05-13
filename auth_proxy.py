@@ -43,7 +43,11 @@ MAX_BODY = 10 * 1024 * 1024
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
-        pass
+        # Log geocode and admin requests, suppress the rest
+        path = getattr(self, "path", "")
+        if "/geocode" in path or "/admin" in path or "/config.js" in path:
+            sys.stderr.write(f"[auth_proxy] {self.address_string()} {fmt % args}\n")
+            sys.stderr.flush()
 
     def _serve_healthz(self):
         try:
@@ -149,6 +153,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/javascript")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
         self.end_headers()
         self.wfile.write(body)
 
