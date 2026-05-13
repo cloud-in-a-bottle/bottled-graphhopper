@@ -10,11 +10,15 @@ from __future__ import annotations
 
 import http.client
 import http.server
+import json
 import os
 import socket
 import socketserver
+import ssl
 import sys
 import threading
+import urllib.parse
+import urllib.request
 
 LISTEN_ADDR = "0.0.0.0"
 LISTEN_PORT = int(os.environ.get("AUTH_PROXY_LISTEN_PORT", "8080"))
@@ -116,11 +120,134 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         finally:
             conn.close()
 
+    def _serve_config_js(self):
+        """Serve a patched config.js that points geocoding at our local proxy."""
+        body = b"""const config = {
+    routingApi: location.origin + '/',
+    geocodingApi: location.origin + '/geocode',
+    defaultTiles: 'OpenStreetMap',
+    keys: {
+        graphhopper: "",
+        maptiler: "",
+        omniscale: "",
+        thunderforest: "",
+        kurviger: ""
+    },
+    routingGraphLayerAllowed: true,
+    request: {
+        details: [
+            'road_class',
+            'road_environment',
+            'max_speed',
+            'average_speed',
+        ],
+        snapPreventions: ['ferry'],
+    },
+    profile_group_mapping: {},
+}
+"""
+        self.send_response(200)
+        self.send_header("Content-Type", "application/javascript")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _geocode_proxy(self):
+        """Proxy geocoding requests to Nominatim, translating to GH format.
+
+        GraphHopper Maps sends: GET /geocode?q=...&limit=...&locale=...
+        We query Nominatim and translate the response to GH geocoding format.
+        """
+        qs = urllib.parse.urlparse(self.path).query
+        params = urllib.parse.parse_qs(qs)
+        query = params.get("q", [""])[0]
+        limit = params.get("limit", ["5"])[0]
+        locale = params.get("locale", ["en"])[0]
+
+        if not query:
+            self._json_response({"hits": []})
+            return
+
+        # Query Nominatim
+        nom_params = urllib.parse.urlencode({
+            "q": query,
+            "format": "json",
+            "limit": limit,
+            "accept-language": locale,
+            "addressdetails": "1",
+        })
+        nom_url = f"https://nominatim.openstreetmap.org/search?{nom_params}"
+
+        try:
+            req = urllib.request.Request(nom_url, headers={
+                "User-Agent": "OpenHost-GraphHopper/1.0",
+                "Accept": "application/json",
+            })
+            ctx = ssl.create_default_context()
+            with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
+                nom_results = json.loads(resp.read().decode())
+        except Exception as e:
+            print(f"[auth_proxy] Nominatim error: {e}", file=sys.stderr)
+            self._json_response({"hits": []})
+            return
+
+        # Translate Nominatim results to GraphHopper geocoding format
+        hits = []
+        for r in nom_results:
+            try:
+                hit = {
+                    "point": {
+                        "lat": float(r["lat"]),
+                        "lng": float(r["lon"]),
+                    },
+                    "osm_id": r.get("osm_id", ""),
+                    "osm_type": r.get("osm_type", ""),
+                    "name": r.get("display_name", ""),
+                    "country": r.get("address", {}).get("country", ""),
+                    "city": (
+                        r.get("address", {}).get("city", "")
+                        or r.get("address", {}).get("town", "")
+                        or r.get("address", {}).get("village", "")
+                    ),
+                    "state": r.get("address", {}).get("state", ""),
+                    "street": r.get("address", {}).get("road", ""),
+                    "housenumber": r.get("address", {}).get("house_number", ""),
+                    "postcode": r.get("address", {}).get("postcode", ""),
+                }
+                # Bounding box
+                if "boundingbox" in r and len(r["boundingbox"]) == 4:
+                    bb = r["boundingbox"]
+                    hit["extent"] = [float(bb[2]), float(bb[0]), float(bb[3]), float(bb[1])]
+                hits.append(hit)
+            except (KeyError, ValueError):
+                continue
+
+        self._json_response({"hits": hits, "locale": locale})
+
+    def _json_response(self, data, code=200):
+        body = json.dumps(data).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
     def _handle(self):
         path_only = self.path.split("?", 1)[0]
 
         if path_only == "/healthz":
             self._serve_healthz()
+            return
+
+        # Serve patched config.js with geocoding enabled
+        if path_only == "/maps/config.js":
+            self._serve_config_js()
+            return
+
+        # Geocoding proxy (Nominatim -> GH format)
+        if path_only == "/geocode":
+            self._geocode_proxy()
             return
 
         # Route /admin* to admin service (owner-only)
