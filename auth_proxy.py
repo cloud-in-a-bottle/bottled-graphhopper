@@ -18,7 +18,7 @@ import threading
 LISTEN_ADDR = "0.0.0.0"
 LISTEN_PORT = int(os.environ.get("AUTH_PROXY_LISTEN_PORT", "8080"))
 UPSTREAM_HOST = "127.0.0.1"
-UPSTREAM_PORT = int(os.environ.get("AUTH_PROXY_UPSTREAM_PORT", "8989"))
+UPSTREAM_PORT = int(os.environ.get("AUTH_PROXY_UPSTREAM_PORT", "8989"))  # GH default
 
 STRIP_HEADERS = frozenset(h.lower() for h in [
     "x-openhost-is-owner", "x-openhost-app-token",

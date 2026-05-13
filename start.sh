@@ -95,12 +95,11 @@ fi
 
 # --- Start GraphHopper ---
 echo "[start.sh] Starting GraphHopper on ${GH_HOST}:${GH_PORT}..."
+# Run GraphHopper server
 cd "$GH_DIR"
 java $JAVA_OPTS \
-    -Ddw.graphhopper.datareader.file="$PBF_FILE" \
-    -Ddw.graphhopper.graph.location="$GRAPH_DIR" \
-    -Ddw.graphhopper.server.application_connectors[0].bind_host="${GH_HOST}" \
-    -Ddw.graphhopper.server.application_connectors[0].port="${GH_PORT}" \
+    "-Ddw.graphhopper.datareader.file=$PBF_FILE" \
+    "-Ddw.graphhopper.graph.location=$GRAPH_DIR" \
     -jar graphhopper-web-*.jar server "$GH_CONFIG" &
 GH_PID=$!
 
