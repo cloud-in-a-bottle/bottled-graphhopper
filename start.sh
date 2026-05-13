@@ -60,9 +60,14 @@ if [ ! -f "$PBF_FILE" ]; then
     echo "[start.sh] Download complete: $(du -h "$PBF_FILE" | cut -f1)"
 fi
 
-# --- Java heap: 60% of allocated memory ---
-TOTAL_MB=${OPENHOST_MEMORY_MB:-8192}
-HEAP_MB=$((TOTAL_MB * 60 / 100))
+# --- Java heap: read container memory limit from cgroup ---
+CGROUP_LIMIT=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo "0")
+if [ "$CGROUP_LIMIT" = "max" ] || [ "$CGROUP_LIMIT" -le 0 ] 2>/dev/null; then
+    TOTAL_MB=8192
+else
+    TOTAL_MB=$((CGROUP_LIMIT / 1048576))
+fi
+HEAP_MB=$((TOTAL_MB * 75 / 100))
 [ "$HEAP_MB" -lt 1024 ] && HEAP_MB=1024
 JAVA_OPTS="-Xmx${HEAP_MB}m -Xms$((HEAP_MB / 2))m"
 export JAVA_OPTS
