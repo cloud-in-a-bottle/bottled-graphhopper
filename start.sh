@@ -37,6 +37,13 @@ trap cleanup EXIT SIGTERM SIGINT
 
 mkdir -p "$APP_DATA"
 
+# --- Migrate: if graph already exists from a previous install, mark setup done ---
+GRAPH_DIR="${APP_DATA}/graph-cache"
+if [ ! -f "$SETUP_SENTINEL" ] && [ -d "$GRAPH_DIR" ] && [ -n "$(ls -A "$GRAPH_DIR" 2>/dev/null)" ]; then
+    echo "[start.sh] Existing graph found — migrating to setup_complete"
+    touch "$SETUP_SENTINEL"
+fi
+
 # --- Setup mode: skip download/build, just run admin + proxy ---
 if [ ! -f "$SETUP_SENTINEL" ]; then
     echo "[start.sh] First boot — starting in setup mode (no region selected)"
