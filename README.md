@@ -5,16 +5,29 @@ GraphHopper routing engine packaged for OpenHost. Provides turn-by-turn car, bik
 ## Architecture
 
 Single container running:
-- GraphHopper (loopback, Java)
+- GraphHopper (loopback, Java) -- only after initial setup
+- Admin UI (loopback, Python) -- region management
 - Auth proxy (port 8080, externally routed)
 
 ## First boot
 
-On first boot, downloads an OSM PBF extract (default: Germany, ~4GB) and builds the routing graph. This takes 10-60 minutes depending on region size. Subsequent boots use the cached graph and start in seconds.
+On first boot, the app starts in setup mode and presents an onboarding
+screen where you choose your region. Once selected, the OSM PBF extract
+is downloaded and the routing graph is built (10-60 minutes depending on
+region size). The container then restarts into normal mode.
+
+Subsequent boots use the cached graph and start in seconds.
 
 ## Changing region
 
-Edit `$OPENHOST_APP_DATA_DIR/region.conf` to set a different PBF_URL, then delete the `graph-cache/` directory and restart. Regional extracts available at https://download.geofabrik.de/
+Visit `/admin` to select a different region. The admin UI is available
+to the zone owner at any time. Selecting a new region triggers a fresh
+download and rebuild, then the container restarts.
+
+You can also edit `$OPENHOST_APP_DATA_DIR/region.conf` manually, delete
+the `graph-cache/` directory, and restart.
+
+Regional extracts available at https://download.geofabrik.de/
 
 ## Resource requirements
 
@@ -29,3 +42,4 @@ Edit `$OPENHOST_APP_DATA_DIR/region.conf` to set a different PBF_URL, then delet
 - `$OPENHOST_APP_DATA_DIR/region.osm.pbf` -- downloaded OSM data
 - `$OPENHOST_APP_DATA_DIR/graph-cache/` -- precomputed routing graph
 - `$OPENHOST_APP_DATA_DIR/region.conf` -- region configuration
+- `$OPENHOST_APP_DATA_DIR/.setup_complete` -- sentinel indicating initial setup is done

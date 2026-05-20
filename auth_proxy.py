@@ -26,6 +26,7 @@ UPSTREAM_HOST = "127.0.0.1"
 UPSTREAM_PORT = int(os.environ.get("AUTH_PROXY_UPSTREAM_PORT", "8989"))
 ADMIN_HOST = "127.0.0.1"
 ADMIN_PORT = 8091
+SETUP_MODE = os.environ.get("GRAPHHOPPER_SETUP_MODE", "") == "1"
 
 STRIP_HEADERS = frozenset(h.lower() for h in [
     "x-openhost-is-owner", "x-openhost-app-token",
@@ -50,14 +51,18 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             sys.stderr.flush()
 
     def _serve_healthz(self):
-        try:
-            s = socket.create_connection((UPSTREAM_HOST, UPSTREAM_PORT), timeout=2)
-            s.close()
-            body = b'{"status":"ok"}'
+        if SETUP_MODE:
+            body = b'{"status":"setup"}'
             code = 200
-        except OSError:
-            body = b'{"status":"starting"}'
-            code = 503
+        else:
+            try:
+                s = socket.create_connection((UPSTREAM_HOST, UPSTREAM_PORT), timeout=2)
+                s.close()
+                body = b'{"status":"ok"}'
+                code = 200
+            except OSError:
+                body = b'{"status":"starting"}'
+                code = 503
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -317,11 +322,34 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _redirect(self, location):
+        try:
+            self.send_response(302)
+            self.send_header("Location", location)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        except OSError:
+            pass
+
     def _handle(self):
         path_only = self.path.split("?", 1)[0]
 
         if path_only == "/healthz":
             self._serve_healthz()
+            return
+
+        # Route /admin* to admin service (owner-only)
+        if path_only.startswith("/admin"):
+            is_owner = self.headers.get("X-OpenHost-Is-Owner", "").lower() == "true"
+            if not is_owner:
+                self.send_error(403, "Admin access requires OpenHost owner")
+                return
+            self._proxy_to(ADMIN_HOST, ADMIN_PORT)
+            return
+
+        # Setup mode: redirect everything else to the region picker
+        if SETUP_MODE:
+            self._redirect("/admin")
             return
 
         # Serve patched config.js with geocoding enabled
@@ -337,15 +365,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # Geocoding proxy (Nominatim -> GH format) for nominatim provider
         if path_only == "/geocode":
             self._geocode_proxy()
-            return
-
-        # Route /admin* to admin service (owner-only)
-        if path_only.startswith("/admin"):
-            is_owner = self.headers.get("X-OpenHost-Is-Owner", "").lower() == "true"
-            if not is_owner:
-                self.send_error(403, "Admin access requires OpenHost owner")
-                return
-            self._proxy_to(ADMIN_HOST, ADMIN_PORT)
             return
 
         # Everything else goes to GraphHopper
