@@ -34,6 +34,8 @@ PBF_FILE = os.path.join(APP_DATA, "region.osm.pbf")
 GRAPH_DIR = os.path.join(APP_DATA, "graph-cache")
 REGION_CONF = os.path.join(APP_DATA, "region.conf")
 STATUS_FILE = os.path.join(APP_DATA, ".admin_status.json")
+SETUP_SENTINEL = os.path.join(APP_DATA, ".setup_complete")
+SETUP_MODE = os.environ.get("GRAPHHOPPER_SETUP_MODE", "") == "1"
 
 GEOFABRIK_INDEX = "https://download.geofabrik.de/index-v1.json"
 
@@ -230,14 +232,19 @@ def _background_download_and_build(pbf_url: str, region_name: str):
                 shutil.rmtree(GRAPH_DIR)
             return
 
+        # Mark setup as complete so next boot starts in normal mode
+        try:
+            with open(SETUP_SENTINEL, "w") as f:
+                f.write(f"{region_name}\n")
+        except OSError:
+            pass
+
         _set_state(
             operation="ready",
-            progress=f"Graph built successfully for {region_name}. Restart the app to use it.",
+            progress=f"Graph built successfully for {region_name}. Restarting...",
             current_region=region_name,
         )
 
-        # Signal GraphHopper to restart by sending SIGTERM to the parent process group
-        # The container supervisor (start.sh) will detect the exit and restart everything
         print(f"[admin] Graph built. Sending SIGTERM to restart.", file=sys.stderr, flush=True)
         os.kill(1, signal.SIGTERM)
 
@@ -248,17 +255,19 @@ def _background_download_and_build(pbf_url: str, region_name: str):
 ADMIN_HTML = """<!DOCTYPE html>
 <html>
 <head>
-<title>GraphHopper Admin</title>
+<title id="page-title">GraphHopper</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; color: #333; }
-  h1 { margin-bottom: 1rem; }
+  h1 { margin-bottom: 0.5rem; }
+  .subtitle { color: #666; margin-bottom: 1.5rem; }
   .card { background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; padding: 1.5rem; margin-bottom: 1rem; }
   .card h2 { margin-bottom: 0.5rem; font-size: 1.1rem; }
   .status { padding: 0.5rem 1rem; border-radius: 4px; margin-bottom: 1rem; }
   .status.ok { background: #d4edda; color: #155724; }
   .status.busy { background: #fff3cd; color: #856404; }
   .status.error { background: #f8d7da; color: #721c24; }
+  .status.setup { background: #d1ecf1; color: #0c5460; }
   label { display: block; margin-bottom: 0.3rem; font-weight: 600; }
   select, input[type=text] { width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; font-size: 1rem; margin-bottom: 1rem; }
   button { padding: 0.6rem 1.5rem; border: none; border-radius: 4px; cursor: pointer; font-size: 1rem; }
@@ -276,12 +285,13 @@ ADMIN_HTML = """<!DOCTYPE html>
 </style>
 </head>
 <body>
-<h1>GraphHopper Region Manager</h1>
+<h1 id="heading">GraphHopper</h1>
+<p id="subtitle" class="subtitle"></p>
 
 <div id="status-box" class="status ok">Loading...</div>
 
 <div class="card">
-  <h2>Select Region</h2>
+  <h2 id="region-heading">Select Region</h2>
   <p class="meta">Data from <a href="https://download.geofabrik.de/">Geofabrik</a>. Type to search.</p>
   <br>
   <div class="search-box">
@@ -302,6 +312,7 @@ ADMIN_HTML = """<!DOCTYPE html>
 <script>
 let regions = [];
 let pollTimer = null;
+let setupMode = false;
 
 async function loadRegions() {
   try {
@@ -320,6 +331,16 @@ async function loadStatus() {
     const prog = document.getElementById('progress-card');
     const btn = document.getElementById('deploy-btn');
 
+    if (s.setup_mode && !setupMode) {
+      setupMode = true;
+      document.getElementById('page-title').textContent = 'GraphHopper Setup';
+      document.getElementById('heading').textContent = 'Welcome to GraphHopper';
+      document.getElementById('subtitle').textContent =
+        'Choose a region to get started. The map data will be downloaded and a routing graph built. This usually takes 10-60 minutes depending on the region size.';
+      document.getElementById('region-heading').textContent = 'Choose Your Region';
+      btn.textContent = 'Get Started';
+    }
+
     if (s.operation === 'downloading' || s.operation === 'building') {
       box.className = 'status busy';
       box.textContent = s.operation === 'downloading' ? 'Downloading...' : 'Building graph...';
@@ -334,6 +355,10 @@ async function loadStatus() {
       document.getElementById('progress-text').textContent = s.progress;
       btn.disabled = false;
       if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    } else if (s.setup_mode && s.operation === 'no_graph') {
+      box.className = 'status setup';
+      box.textContent = 'No region configured yet. Select one below to get started.';
+      btn.disabled = false;
     } else {
       const region = s.current_region || 'Unknown';
       box.className = 'status ok';
@@ -377,7 +402,10 @@ async function deploy() {
   const url = document.getElementById('selected-url').value;
   const name = document.getElementById('selected-name').value;
   if (!url) { alert('Select a region first'); return; }
-  if (!confirm('Download ' + name + ' and rebuild the routing graph? This will restart GraphHopper.')) return;
+  const msg = setupMode
+    ? 'Download ' + name + ' and build the routing graph?'
+    : 'Download ' + name + ' and rebuild the routing graph? This will restart GraphHopper.';
+  if (!confirm(msg)) return;
 
   document.getElementById('deploy-btn').disabled = true;
   try {
@@ -442,7 +470,7 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
         elif path == "/admin/api/status":
             state = _get_state()
             state["current_region"] = _read_current_region()
-            # Check if graph exists
+            state["setup_mode"] = SETUP_MODE
             has_graph = os.path.isdir(GRAPH_DIR) and len(os.listdir(GRAPH_DIR)) > 0
             if state["operation"] is None:
                 state["operation"] = "ok" if has_graph else "no_graph"

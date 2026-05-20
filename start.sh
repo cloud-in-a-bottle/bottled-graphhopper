@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # start.sh — OpenHost supervisor for GraphHopper.
 #
-# Manages two processes:
-#   1. GraphHopper          (127.0.0.1:8989)
-#   2. Auth proxy           (0.0.0.0:8080)
+# Manages up to three processes:
+#   1. GraphHopper          (127.0.0.1:8989)  — only after setup
+#   2. Admin UI             (127.0.0.1:8091)
+#   3. Auth proxy           (0.0.0.0:8080)
 #
-# On first boot, downloads an OSM PBF extract and builds the routing graph.
-# Default region: Germany. Configure via $OPENHOST_APP_DATA_DIR/region.conf
+# On first boot (no .setup_complete sentinel), starts in setup mode:
+# only the admin UI and auth proxy run, and all requests redirect to
+# the region picker. Once the user picks a region and the graph builds,
+# the sentinel is written and the container restarts into normal mode.
 
 set -euo pipefail
 
@@ -21,6 +24,8 @@ GH_PID=""
 PROXY_PID=""
 ADMIN_PID=""
 
+SETUP_SENTINEL="${APP_DATA}/.setup_complete"
+
 cleanup() {
     echo "[start.sh] Shutting down..."
     [ -n "$PROXY_PID" ] && kill "$PROXY_PID" 2>/dev/null || true
@@ -32,7 +37,29 @@ trap cleanup EXIT SIGTERM SIGINT
 
 mkdir -p "$APP_DATA"
 
-# --- Region configuration ---
+# --- Setup mode: skip download/build, just run admin + proxy ---
+if [ ! -f "$SETUP_SENTINEL" ]; then
+    echo "[start.sh] First boot — starting in setup mode (no region selected)"
+    export GRAPHHOPPER_SETUP_MODE=1
+
+    echo "[start.sh] Starting admin UI on 127.0.0.1:8091..."
+    python3 /opt/openhost/admin.py &
+    ADMIN_PID=$!
+
+    echo "[start.sh] Starting auth proxy on 0.0.0.0:${PROXY_PORT}..."
+    python3 /opt/openhost/auth_proxy.py &
+    PROXY_PID=$!
+
+    echo "[start.sh] Setup mode ready. Visit the app to select a region."
+    wait -n "$ADMIN_PID" "$PROXY_PID"
+    EXIT_CODE=$?
+    echo "[start.sh] Child exited (code=$EXIT_CODE)."
+    exit "$EXIT_CODE"
+fi
+
+# --- Normal mode: region already configured ---
+
+# Region configuration
 REGION_CONF="${APP_DATA}/region.conf"
 PBF_URL="https://download.geofabrik.de/north-america/us/california-latest.osm.pbf"
 
@@ -40,15 +67,6 @@ if [ -f "$REGION_CONF" ]; then
     # shellcheck source=/dev/null
     source "$REGION_CONF"
     echo "[start.sh] Region: $PBF_URL"
-else
-    cat > "$REGION_CONF" <<'EOF'
-# GraphHopper region configuration
-# Change PBF_URL to load a different region, then delete
-# graph-cache/ directory in app_data and restart.
-# Extracts: https://download.geofabrik.de/
-PBF_URL=https://download.geofabrik.de/north-america/us/california-latest.osm.pbf
-EOF
-    echo "[start.sh] Created default region.conf (Germany)"
 fi
 
 PBF_FILE="${APP_DATA}/region.osm.pbf"
@@ -76,8 +94,6 @@ export JAVA_OPTS
 echo "[start.sh] Java heap: ${HEAP_MB}m"
 
 # --- Use upstream config with overrides via system properties ---
-# The upstream image has config-example.yml with sensible defaults.
-# We override specific settings via -D flags at runtime.
 GH_CONFIG="${GH_DIR}/config-example.yml"
 
 # --- Build graph if not present ---
@@ -97,7 +113,6 @@ fi
 
 # --- Start GraphHopper ---
 echo "[start.sh] Starting GraphHopper on ${GH_HOST}:${GH_PORT}..."
-# Run GraphHopper server
 cd "$GH_DIR"
 java $JAVA_OPTS \
     "-Ddw.graphhopper.datareader.file=$PBF_FILE" \
