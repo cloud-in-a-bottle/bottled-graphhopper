@@ -1,6 +1,6 @@
-# openhost-graphhopper
+# bottled-graphhopper
 
-GraphHopper routing engine packaged for OpenHost. Provides turn-by-turn car, bike, and foot navigation with a built-in web UI.
+GraphHopper routing engine packaged for Cloud in a Bottle. Provides turn-by-turn car, bike, and foot navigation with a built-in web UI.
 
 ## Architecture
 
