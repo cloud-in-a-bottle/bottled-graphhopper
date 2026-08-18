@@ -17,7 +17,6 @@ import http.server
 import json
 import os
 import shutil
-import signal
 import socketserver
 import subprocess
 import sys
@@ -35,6 +34,9 @@ GRAPH_DIR = os.path.join(APP_DATA, "graph-cache")
 REGION_CONF = os.path.join(APP_DATA, "region.conf")
 STATUS_FILE = os.path.join(APP_DATA, ".admin_status.json")
 SETUP_SENTINEL = os.path.join(APP_DATA, ".setup_complete")
+# Dropped to ask start.sh's supervisor to cycle into normal mode (or reload a
+# newly built region) in-process, without exiting the container.
+RESTART_FLAG = os.path.join(APP_DATA, ".restart_requested")
 SETUP_MODE = os.environ.get("GRAPHHOPPER_SETUP_MODE", "") == "1"
 
 GEOFABRIK_INDEX = "https://download.geofabrik.de/index-v1.json"
@@ -232,7 +234,7 @@ def _background_download_and_build(pbf_url: str, region_name: str):
                 shutil.rmtree(GRAPH_DIR)
             return
 
-        # Mark setup as complete so next boot starts in normal mode
+        # Mark setup as complete so the supervisor runs in normal mode
         try:
             with open(SETUP_SENTINEL, "w") as f:
                 f.write(f"{region_name}\n")
@@ -245,8 +247,16 @@ def _background_download_and_build(pbf_url: str, region_name: str):
             current_region=region_name,
         )
 
-        print(f"[admin] Graph built. Sending SIGTERM to restart.", file=sys.stderr, flush=True)
-        os.kill(1, signal.SIGTERM)
+        # Ask start.sh's supervisor to cycle into normal mode (or reload the new
+        # region) by dropping a flag file. We deliberately do NOT kill PID 1: a
+        # stopped container is not reliably relaunched by the runtime, which
+        # would leave the app dead after a successful build.
+        print("[admin] Graph built. Requesting supervisor restart.", file=sys.stderr, flush=True)
+        try:
+            with open(RESTART_FLAG, "w") as f:
+                f.write("restart\n")
+        except OSError as e:
+            print(f"[admin] Failed to write restart flag: {e}", file=sys.stderr, flush=True)
 
     except Exception as e:
         _set_state(operation="error", error=str(e), progress="")
