@@ -251,7 +251,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         patch = b"""<script>
 (function() {
     const origFetch = window.fetch;
-    const DEBOUNCE_MS = 1500;
+    const DEBOUNCE_MS = 750;
     const cache = new Map();
     const emptyResp = () => new Response(JSON.stringify({hits: []}),
         {status: 200, headers: {'Content-Type': 'application/json'}});
