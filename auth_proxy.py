@@ -17,6 +17,7 @@ import socketserver
 import ssl
 import sys
 import threading
+import time
 import urllib.parse
 import urllib.request
 
@@ -39,6 +40,63 @@ HOP_BY_HOP = frozenset(h.lower() for h in [
 ])
 
 MAX_BODY = 10 * 1024 * 1024
+
+# --- Geocoding (Nominatim) rate-limit protection -------------------------
+# The GraphHopper Maps UI fires a geocode request on every keystroke. The
+# public Nominatim service (nominatim.openstreetmap.org) allows at most ~1
+# request/second and explicitly forbids autocomplete-style usage, so an
+# unthrottled per-keystroke stream trips HTTP 429 within a couple of seconds
+# and the address dropdown goes empty. We defend on two layers:
+#   - Client side: the shim injected into /maps/ debounces keystrokes and
+#     caches results, so a burst of typing yields a single upstream request.
+#   - Server side: this small TTL cache dedupes repeated/identical queries
+#     across clients, and we skip Nominatim entirely for very short queries.
+GEOCODE_MIN_QUERY_LEN = 3
+_GEOCODE_CACHE_TTL = 300.0
+_GEOCODE_CACHE_MAX = 512
+_geocode_cache = {}          # key -> (expires_at_monotonic, payload_dict)
+_geocode_cache_lock = threading.Lock()
+
+
+def _geocode_cache_get(key):
+    with _geocode_cache_lock:
+        item = _geocode_cache.get(key)
+        if not item:
+            return None
+        expires_at, payload = item
+        if expires_at < time.monotonic():
+            _geocode_cache.pop(key, None)
+            return None
+        return payload
+
+
+def _geocode_cache_put(key, payload):
+    with _geocode_cache_lock:
+        if len(_geocode_cache) >= _GEOCODE_CACHE_MAX:
+            _geocode_cache.clear()
+        _geocode_cache[key] = (time.monotonic() + _GEOCODE_CACHE_TTL, payload)
+
+
+# Global throttle: never send more than one request/second to the public
+# Nominatim service (its usage policy's hard limit), no matter how many clients
+# or threads are active. We serialize upstream calls and *wait* for the window
+# to open rather than dropping the request, so a query that arrives too soon
+# still succeeds (a beat later) instead of getting a 429. Cache hits bypass
+# this entirely.
+NOMINATIM_MIN_INTERVAL = 1.0
+_nominatim_lock = threading.Lock()
+_nominatim_last_call = 0.0   # time.monotonic() of the last upstream request
+
+
+def _nominatim_throttle():
+    """Block until at least NOMINATIM_MIN_INTERVAL has passed since the last
+    upstream Nominatim request, then reserve this slot."""
+    global _nominatim_last_call
+    with _nominatim_lock:
+        wait = NOMINATIM_MIN_INTERVAL - (time.monotonic() - _nominatim_last_call)
+        if wait > 0:
+            time.sleep(wait)
+        _nominatim_last_call = time.monotonic()
 
 
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
@@ -181,48 +239,56 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._proxy_to(UPSTREAM_HOST, UPSTREAM_PORT)
             return
 
-        # Inject geocoding patch before </head>
+        # Inject geocoding patch before </head>.
+        #
+        # The Maps UI calls fetch('/geocode?...') on every keystroke. We route
+        # every geocode through the server-side /geocode proxy (single path, so
+        # Nominatim is hit at most once per query with a proper User-Agent),
+        # and we DEBOUNCE bursts of keystrokes plus cache results so a public
+        # Nominatim instance is not flooded (which returns HTTP 429 and breaks
+        # the address dropdown). Superseded keystrokes resolve to empty hits;
+        # only the latest query in a burst issues an upstream request.
         patch = b"""<script>
-// Geocoding patch: intercept fetch to /geocode?provider=default
-// and return Nominatim results in a format the dropdown understands
 (function() {
     const origFetch = window.fetch;
+    const DEBOUNCE_MS = 750;
+    const cache = new Map();
+    const emptyResp = () => new Response(JSON.stringify({hits: []}),
+        {status: 200, headers: {'Content-Type': 'application/json'}});
+    const jsonResp = (data) => new Response(JSON.stringify(data),
+        {status: 200, headers: {'Content-Type': 'application/json'}});
+
+    let timer = null;
+    let pending = [];   // {url, resolve} queued during the current debounce window
+
+    function flush() {
+        timer = null;
+        const batch = pending;
+        pending = [];
+        if (!batch.length) return;
+        const latest = batch[batch.length - 1];
+        // Only the latest query hits the server; earlier ones get empty hits.
+        origFetch(latest.url, {headers: {'Accept': 'application/json'}})
+            .then(r => r.json())
+            .then(data => {
+                cache.set(latest.url, data);
+                batch.forEach(item => item.resolve(
+                    item.url === latest.url ? jsonResp(data) : emptyResp()));
+            })
+            .catch(() => batch.forEach(item => item.resolve(emptyResp())));
+    }
+
     window.fetch = function(url, opts) {
-        if (typeof url === 'string' && url.includes('/geocode?') && url.includes('provider=default')) {
+        if (typeof url === 'string' && url.indexOf('/geocode?') !== -1) {
             const u = new URL(url, location.origin);
-            const q = u.searchParams.get('q');
-            if (!q || q.length < 2) return origFetch.apply(this, arguments);
-            const locale = u.searchParams.get('locale') || 'en';
-            const nomUrl = 'https://nominatim.openstreetmap.org/search?format=json&limit=5&addressdetails=1' +
-                '&accept-language=' + encodeURIComponent(locale) +
-                '&q=' + encodeURIComponent(q);
-            return fetch(nomUrl, {headers: {'Accept': 'application/json'}})
-                .then(r => r.json())
-                .then(results => {
-                    const hits = results.map(r => ({
-                        point: {lat: parseFloat(r.lat), lng: parseFloat(r.lon)},
-                        name: r.display_name,
-                        osm_id: r.osm_id,
-                        osm_type: r.osm_type,
-                        osm_key: r.class || '',
-                        osm_value: r.type || '',
-                        country: (r.address||{}).country || '',
-                        city: (r.address||{}).city || (r.address||{}).town || (r.address||{}).village || '',
-                        state: (r.address||{}).state || '',
-                        street: (r.address||{}).road || '',
-                        housenumber: (r.address||{}).house_number || '',
-                        postcode: (r.address||{}).postcode || '',
-                        extent: r.boundingbox ? [
-                            parseFloat(r.boundingbox[2]), parseFloat(r.boundingbox[0]),
-                            parseFloat(r.boundingbox[3]), parseFloat(r.boundingbox[1])
-                        ] : undefined
-                    }));
-                    return new Response(JSON.stringify({hits: hits, locale: locale}), {
-                        status: 200,
-                        headers: {'Content-Type': 'application/json'}
-                    });
-                })
-                .catch(() => origFetch.apply(this, arguments));
+            const q = (u.searchParams.get('q') || '').trim();
+            if (q.length < 2) return Promise.resolve(emptyResp());
+            if (cache.has(url)) return Promise.resolve(jsonResp(cache.get(url)));
+            return new Promise(resolve => {
+                pending.push({url: url, resolve: resolve});
+                if (timer) clearTimeout(timer);
+                timer = setTimeout(flush, DEBOUNCE_MS);
+            });
         }
         return origFetch.apply(this, arguments);
     };
@@ -253,8 +319,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         limit = params.get("limit", ["5"])[0]
         locale = params.get("locale", ["en"])[0]
 
-        if not query:
+        # Skip very short queries — they match everything and just burn our
+        # Nominatim rate budget on incomplete keystrokes.
+        if len(query.strip()) < GEOCODE_MIN_QUERY_LEN:
             self._json_response({"hits": []})
+            return
+
+        # Serve identical repeat queries from cache without hitting Nominatim.
+        cache_key = (query.strip().lower(), limit, locale)
+        cached = _geocode_cache_get(cache_key)
+        if cached is not None:
+            self._json_response(cached)
             return
 
         # Query Nominatim
@@ -273,6 +348,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 "Accept": "application/json",
             })
             ctx = ssl.create_default_context()
+            # Enforce the global 1 req/s cap before hitting Nominatim.
+            _nominatim_throttle()
             with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
                 nom_results = json.loads(resp.read().decode())
         except Exception as e:
@@ -311,7 +388,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             except (KeyError, ValueError):
                 continue
 
-        self._json_response({"hits": hits, "locale": locale})
+        payload = {"hits": hits, "locale": locale}
+        _geocode_cache_put(cache_key, payload)
+        self._json_response(payload)
 
     def _json_response(self, data, code=200):
         body = json.dumps(data).encode()
