@@ -77,6 +77,28 @@ def _geocode_cache_put(key, payload):
         _geocode_cache[key] = (time.monotonic() + _GEOCODE_CACHE_TTL, payload)
 
 
+# Global throttle: never send more than one request/second to the public
+# Nominatim service (its usage policy's hard limit), no matter how many clients
+# or threads are active. We serialize upstream calls and *wait* for the window
+# to open rather than dropping the request, so a query that arrives too soon
+# still succeeds (a beat later) instead of getting a 429. Cache hits bypass
+# this entirely.
+NOMINATIM_MIN_INTERVAL = 1.0
+_nominatim_lock = threading.Lock()
+_nominatim_last_call = 0.0   # time.monotonic() of the last upstream request
+
+
+def _nominatim_throttle():
+    """Block until at least NOMINATIM_MIN_INTERVAL has passed since the last
+    upstream Nominatim request, then reserve this slot."""
+    global _nominatim_last_call
+    with _nominatim_lock:
+        wait = NOMINATIM_MIN_INTERVAL - (time.monotonic() - _nominatim_last_call)
+        if wait > 0:
+            time.sleep(wait)
+        _nominatim_last_call = time.monotonic()
+
+
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
@@ -229,7 +251,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         patch = b"""<script>
 (function() {
     const origFetch = window.fetch;
-    const DEBOUNCE_MS = 350;
+    const DEBOUNCE_MS = 1500;
     const cache = new Map();
     const emptyResp = () => new Response(JSON.stringify({hits: []}),
         {status: 200, headers: {'Content-Type': 'application/json'}});
@@ -326,6 +348,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 "Accept": "application/json",
             })
             ctx = ssl.create_default_context()
+            # Enforce the global 1 req/s cap before hitting Nominatim.
+            _nominatim_throttle()
             with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
                 nom_results = json.loads(resp.read().decode())
         except Exception as e:
