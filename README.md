@@ -2,6 +2,13 @@
 
 GraphHopper routing engine packaged for Cloud in a Bottle. Provides turn-by-turn car, bike, and foot navigation with a built-in web UI.
 
+Built on the open-source [GraphHopper](https://www.graphhopper.com/)
+routing engine ([github.com/graphhopper/graphhopper](https://github.com/graphhopper/graphhopper)),
+using the [`israelhikingmap/graphhopper`](https://hub.docker.com/r/israelhikingmap/graphhopper)
+base image and [OpenStreetMap](https://www.openstreetmap.org/) data via
+[Geofabrik](https://download.geofabrik.de/) extracts. Address search
+(geocoding) is served through [Nominatim](https://nominatim.openstreetmap.org/).
+
 ## Architecture
 
 Single container running:
