@@ -13,6 +13,7 @@ Runs on 127.0.0.1:8091, proxied by auth_proxy.py.
 
 from __future__ import annotations
 
+import hashlib
 import http.server
 import json
 import os
@@ -233,6 +234,18 @@ def _background_download_and_build(pbf_url: str, region_name: str):
             if os.path.isdir(GRAPH_DIR):
                 shutil.rmtree(GRAPH_DIR)
             return
+
+        # Record which GraphHopper built the graph; start.sh rebuilds it when
+        # the jar changes (a cache only loads in the version that built it).
+        try:
+            digest = hashlib.sha256()
+            with open(os.path.join(GH_DIR, jar_files[0]), "rb") as jar:
+                for chunk in iter(lambda: jar.read(1 << 20), b""):
+                    digest.update(chunk)
+            with open(os.path.join(GRAPH_DIR, ".openhost-built-with"), "w") as f:
+                f.write(digest.hexdigest() + "\n")
+        except OSError:
+            pass
 
         # Mark setup as complete so the supervisor runs in normal mode
         try:

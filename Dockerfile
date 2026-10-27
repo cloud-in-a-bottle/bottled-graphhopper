@@ -7,7 +7,11 @@
 # No app-level SSO — OpenHost zone_auth gates all access.
 # On first boot, downloads an OSM PBF extract and builds routing graph.
 
-FROM docker.io/israelhikingmap/graphhopper:latest
+# Pinned to the latest stable release (not a pre-release) that has an image,
+# with its multi-arch index digest. Bump both
+# together, deliberately, after CI passes. (:latest is a nightly build of
+# GraphHopper master, so it is not used.)
+FROM docker.io/israelhikingmap/graphhopper:11.0@sha256:e77e14e48ea69ea7bb0eb71ddc9d583e5ce85dd295475572371f72ed4880a1ff
 
 USER root
 
