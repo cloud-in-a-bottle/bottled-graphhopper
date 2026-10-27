@@ -144,6 +144,17 @@ start_normal_mode() {
         fi
     fi
 
+    # --- Rebuild the graph when GraphHopper itself changed ---
+    # A graph cache only loads in the GraphHopper version that built it, so a
+    # version bump (or a downgrade) must rebuild it. Caches from before this
+    # marker existed are rebuilt once.
+    local GH_JAR_ID BUILT_WITH="${GRAPH_DIR}/.openhost-built-with"
+    GH_JAR_ID="$(cd "$GH_DIR" && sha256sum graphhopper-web-*.jar | cut -d' ' -f1)"
+    if [ -n "$(ls -A "$GRAPH_DIR" 2>/dev/null)" ] && [ "$(cat "$BUILT_WITH" 2>/dev/null)" != "$GH_JAR_ID" ]; then
+        echo "[start.sh] GraphHopper changed since the graph was built; rebuilding it."
+        rm -rf "$GRAPH_DIR"
+    fi
+
     # --- Build graph if missing (fallback) ---
     if [ ! -d "$GRAPH_DIR" ] || [ -z "$(ls -A "$GRAPH_DIR" 2>/dev/null)" ]; then
         echo "[start.sh] Building routing graph (first boot, may take 10-60 min)..."
@@ -156,6 +167,7 @@ start_normal_mode() {
             return 1
         fi
         echo "[start.sh] Graph complete: $(du -sh "$GRAPH_DIR" | cut -f1)"
+        echo "$GH_JAR_ID" > "$BUILT_WITH"
     fi
 
     # --- Start GraphHopper ---
