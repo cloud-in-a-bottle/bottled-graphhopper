@@ -50,3 +50,10 @@ Regional extracts available at https://download.geofabrik.de/
 - `$OPENHOST_APP_DATA_DIR/graph-cache/` -- precomputed routing graph
 - `$OPENHOST_APP_DATA_DIR/region.conf` -- region configuration
 - `$OPENHOST_APP_DATA_DIR/.setup_complete` -- sentinel indicating initial setup is done
+
+## Prebuilt image
+
+`cloudinabottle.toml` sets `prebuilt_image`, so Cloud in a Bottle pulls our
+signed prebuilt image (built by CI from each release tag) instead of
+building the Dockerfile. To fork and modify this app, comment out
+`prebuilt_image` so your instance builds from source.
