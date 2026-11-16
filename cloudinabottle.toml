@@ -1,6 +1,7 @@
 [app]
 name = "graphhopper"
-version = "1.0.0"
+version = "1.0.1"
+release_tag_format = "semver"
 description = "GraphHopper — self-hosted routing engine with built-in map UI. Supports car, bike, and foot navigation with turn-by-turn directions."
 authors = ["Andrew Laack <andrew@laack.co>"]
 
